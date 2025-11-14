@@ -1,23 +1,23 @@
 from flask import Flask, render_template, request, jsonify
 import pickle
 import numpy as np
-from keras.models import load_model
-from keras.applications.vgg16 import VGG16, preprocess_input
-from keras.preprocessing.image import load_img, img_to_array
-from keras.preprocessing.sequence import pad_sequences
-from keras.models import Model
+from tensorflow.keras.models import load_model
+from tensorflow.keras.applications.vgg16 import VGG16, preprocess_input
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.models import Model
 import os
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB file limit
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max size
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
 
-# Create uploads folder if not exists
+# Create uploads folder
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Global model vars
+# Global variables
 model = None
 tokenizer = None
 vgg = None
@@ -29,34 +29,30 @@ def allowed_file(filename):
 
 
 def load_models():
-    """Load caption model, tokenizer, and VGG16 at server start."""
+    """Load ML models at startup"""
     global model, tokenizer, vgg
 
-    print("\n======== LOADING MODELS ========\n")
+    print("Loading models...")
 
-    # Load trained caption model
+    # Caption model
     model = load_model("caption_model.h5", compile=False)
-    print("✔ Loaded caption model")
+    print("✔ Caption model loaded")
 
-    # Load tokenizer
+    # Tokenizer
     with open("tokenizer.pkl", "rb") as f:
         tokenizer = pickle.load(f)
-    print("✔ Loaded tokenizer")
+    print("✔ Tokenizer loaded")
 
-    # Load VGG16 feature extractor
+    # VGG16 model
     vgg_model = VGG16()
     vgg = Model(inputs=vgg_model.inputs, outputs=vgg_model.layers[-2].output)
-    print("✔ Loaded VGG16")
+    print("✔ VGG16 loaded")
 
-    print("\n======== MODELS READY ========\n")
-
-
-# 🚀 IMPORTANT: Load models ONCE at startup
-load_models()
+    print("All models ready!")
 
 
 def extract_feature(img_path):
-    """Extract features using VGG16."""
+    """Extract image features using VGG16"""
     try:
         img = load_img(img_path, target_size=(224, 224))
         img = img_to_array(img)
@@ -65,22 +61,26 @@ def extract_feature(img_path):
         feature = vgg.predict(img, verbose=0)
         return feature
     except Exception as e:
-        print("Feature extraction error:", e)
+        print(f"Error extracting features: {e}")
         return None
 
 
 def generate_caption_greedy(photo):
-    """Greedy decoding."""
+    """Greedy decoding"""
     in_text = "startseq"
 
-    for _ in range(max_len):
+    for i in range(max_len):
         seq = tokenizer.texts_to_sequences([in_text])[0]
         seq = pad_sequences([seq], maxlen=max_len)
 
         yhat = model.predict([photo, seq], verbose=0)
         yhat_idx = np.argmax(yhat)
 
-        word = next((w for w, i in tokenizer.word_index.items() if i == yhat_idx), None)
+        word = None
+        for w, idx in tokenizer.word_index.items():
+            if idx == yhat_idx:
+                word = w
+                break
 
         if word is None or word == "endseq":
             break
@@ -91,21 +91,26 @@ def generate_caption_greedy(photo):
 
 
 def generate_caption_sampling(photo, temperature=0.7):
-    """Temperature sampling."""
+    """Sampling-based generation"""
     in_text = "startseq"
 
-    for _ in range(max_len):
+    for i in range(max_len):
         seq = tokenizer.texts_to_sequences([in_text])[0]
         seq = pad_sequences([seq], maxlen=max_len)
 
         yhat = model.predict([photo, seq], verbose=0)[0]
 
         yhat = np.log(yhat + 1e-10) / temperature
-        yhat = np.exp(yhat) / np.sum(np.exp(yhat))
+        exp_yhat = np.exp(yhat)
+        yhat = exp_yhat / np.sum(exp_yhat)
 
         yhat_idx = np.random.choice(len(yhat), p=yhat)
 
-        word = next((w for w, i in tokenizer.word_index.items() if i == yhat_idx), None)
+        word = None
+        for w, idx in tokenizer.word_index.items():
+            if idx == yhat_idx:
+                word = w
+                break
 
         if word is None or word == "endseq":
             break
@@ -116,28 +121,32 @@ def generate_caption_sampling(photo, temperature=0.7):
 
 
 def generate_caption_no_repeat(photo):
-    """Block repeated words."""
+    """Caption generation with repetition penalty"""
     in_text = "startseq"
-    used = set()
+    used_words = set()
 
-    for _ in range(max_len):
+    for i in range(max_len):
         seq = tokenizer.texts_to_sequences([in_text])[0]
         seq = pad_sequences([seq], maxlen=max_len)
 
         yhat = model.predict([photo, seq], verbose=0)[0]
 
-        for w, i in tokenizer.word_index.items():
-            if w in used and i < len(yhat):
-                yhat[i] *= 0.3
+        for w, idx in tokenizer.word_index.items():
+            if w in used_words and idx < len(yhat):
+                yhat[idx] *= 0.3
 
         yhat_idx = np.argmax(yhat)
 
-        word = next((w for w, i in tokenizer.word_index.items() if i == yhat_idx), None)
+        word = None
+        for w, idx in tokenizer.word_index.items():
+            if idx == yhat_idx:
+                word = w
+                break
 
         if word is None or word == "endseq":
             break
 
-        used.add(word)
+        used_words.add(word)
         in_text += " " + word
 
     return in_text.replace("startseq", "").replace("endseq", "").strip()
@@ -151,7 +160,7 @@ def index():
 @app.route('/generate-caption', methods=['POST'])
 def generate_caption():
     if 'image' not in request.files:
-        return jsonify({'error': 'No image provided'}), 400
+        return jsonify({'error': 'No image file provided'}), 400
 
     file = request.files['image']
 
@@ -159,7 +168,7 @@ def generate_caption():
         return jsonify({'error': 'No file selected'}), 400
 
     if not allowed_file(file.filename):
-        return jsonify({'error': 'Unsupported file type'}), 400
+        return jsonify({'error': 'Invalid file type'}), 400
 
     try:
         filename = secure_filename(file.filename)
@@ -172,21 +181,22 @@ def generate_caption():
             return jsonify({'error': 'Failed to process image'}), 500
 
         captions = {
-            'greedy': generate_caption_greedy(photo),
-            'sampling_low': generate_caption_sampling(photo, 0.5),
-            'sampling_high': generate_caption_sampling(photo, 0.7),
-            'no_repeat': generate_caption_no_repeat(photo)
+            "greedy": generate_caption_greedy(photo),
+            "sampling_low": generate_caption_sampling(photo, temperature=0.5),
+            "sampling_high": generate_caption_sampling(photo, temperature=0.7),
+            "no_repeat": generate_caption_no_repeat(photo),
         }
 
         os.remove(filepath)
 
-        return jsonify({'success': True, 'captions': captions})
+        return jsonify({"success": True, "captions": captions})
 
     except Exception as e:
-        print("ERROR:", e)
-        return jsonify({'error': str(e)}), 500
+        print("Error:", e)
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == '__main__':
+    load_models()
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
