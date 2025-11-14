@@ -1,0 +1,10 @@
+Flask==2.3.2
+Werkzeug==2.3.7
+numpy
+tensorflow==2.12.0
+keras==2.12.0
+Pillow
+h5py
+protobuf==3.20.*
+gunicorn
+opencv-python

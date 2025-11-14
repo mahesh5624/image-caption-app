@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Caption Generator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🖼️ Image Caption Generator</h1>
+            <p>Upload an image and let AI describe it for you</p>
+        </header>
+
+        <div class="upload-section">
+            <div class="upload-box" id="uploadBox">
+                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="17 8 12 3 7 8"></polyline>
+                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                <p class="upload-text">Drag & drop an image here</p>
+                <p class="upload-subtext">or</p>
+                <button class="browse-btn" id="browseBtn">Browse Files</button>
+                <input type="file" id="fileInput" accept="image/*" hidden>
+                <p class="file-info">Supports: PNG, JPG, JPEG, GIF, BMP (max 16MB)</p>
+            </div>
+
+            <div class="preview-section" id="previewSection" style="display: none;">
+                <img id="previewImage" alt="Preview">
+                <button class="change-btn" id="changeBtn">Change Image</button>
+            </div>
+        </div>
+
+        <div class="loading" id="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Generating captions...</p>
+        </div>
+
+        <div class="results" id="results" style="display: none;">
+            <h2>Generated Captions</h2>
+            
+            <div class="caption-card">
+                <div class="caption-header">
+                    <span class="caption-label">🎯 Greedy Decoding</span>
+                    <span class="caption-tag">Most Confident</span>
+                </div>
+                <p class="caption-text" id="captionGreedy"></p>
+            </div>
+
+            <div class="caption-card">
+                <div class="caption-header">
+                    <span class="caption-label">🌡️ Temperature Sampling (0.5)</span>
+                    <span class="caption-tag">Conservative</span>
+                </div>
+                <p class="caption-text" id="captionSamplingLow"></p>
+            </div>
+
+            <div class="caption-card">
+                <div class="caption-header">
+                    <span class="caption-label">🌡️ Temperature Sampling (0.7)</span>
+                    <span class="caption-tag">Creative</span>
+                </div>
+                <p class="caption-text" id="captionSamplingHigh"></p>
+            </div>
+
+            <div class="caption-card">
+                <div class="caption-header">
+                    <span class="caption-label">🔄 No Repetition</span>
+                    <span class="caption-tag">Diverse</span>
+                </div>
+                <p class="caption-text" id="captionNoRepeat"></p>
+            </div>
+
+            <button class="try-again-btn" id="tryAgainBtn">Try Another Image</button>
+        </div>
+
+        <div class="error" id="error" style="display: none;">
+            <p class="error-text" id="errorText"></p>
+            <button class="try-again-btn" id="errorRetryBtn">Try Again</button>
+        </div>
+    </div>
+
+    <footer>
+        <p>Powered by VGG16 + LSTM | Built with Flask</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
