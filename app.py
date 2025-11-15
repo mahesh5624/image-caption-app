@@ -2,6 +2,8 @@ from flask import Flask, render_template, request, jsonify
 import numpy as np
 import pickle
 import os
+import logging
+import traceback
 
 from tensorflow.keras.models import load_model, Model
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
@@ -9,13 +11,19 @@ from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.applications.vgg16 import VGG16, preprocess_input
 from werkzeug.utils import secure_filename
 
+# --- Set up logging ---
+logging.basicConfig(level=logging.INFO)
+
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = "uploads"
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "bmp"}
 
-# Create upload folder
-os.makedirs("uploads", exist_ok=True)
+# Create upload folder in /tmp for serverless environments
+UPLOAD_DIR = os.path.join("/tmp", "uploads") if os.path.exists("/tmp") else "uploads"
+app.config["UPLOAD_FOLDER"] = UPLOAD_DIR
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+logging.info(f"Using upload directory: {UPLOAD_DIR}")
 
 # Globals
 model = None
@@ -28,39 +36,75 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+# --- Updated load_models with error logging ---
 def load_models():
     global model, tokenizer, vgg
 
-    print("Loading caption model...")
-    model = load_model("caption_model.h5", compile=False)
-    print("✔ caption_model.h5 loaded")
+    try:
+        logging.info("Loading caption model (caption_model.h5)...")
+        # This will load your RENAMED epoch_20 model
+        model = load_model("caption_model.h5", compile=False)
+        logging.info("✔ caption_model.h5 loaded")
+    except FileNotFoundError:
+        logging.error("❌ ERROR: caption_model.h5 not found.")
+    except MemoryError:
+        logging.error("❌ MEMORY ERROR: Ran out of RAM loading caption_model.h5.")
+    except Exception as e:
+        logging.error(f"❌ Unknown error loading caption_model.h5: {e}")
+        traceback.print_exc()
 
-    print("Loading tokenizer...")
-    with open("tokenizer.pkl", "rb") as f:
-        tokenizer = pickle.load(f)
-    print("✔ tokenizer.pkl loaded")
+    try:
+        logging.info("Loading tokenizer (tokenizer.pkl)...")
+        with open("tokenizer.pkl", "rb") as f:
+            tokenizer = pickle.load(f)
+        logging.info("✔ tokenizer.pkl loaded")
+    except FileNotFoundError:
+        logging.error("❌ ERROR: tokenizer.pkl not found.")
+    except Exception as e:
+        logging.error(f"❌ Unknown error loading tokenizer.pkl: {e}")
+        traceback.print_exc()
 
-    print("Loading VGG16 FC2 (4096-dim)...")
-    base = VGG16(weights="imagenet", include_top=True)
-    vgg = Model(inputs=base.input, outputs=base.get_layer("fc2").output)
-    print("✔ VGG16 loaded successfully")
+    try:
+        logging.info("Loading VGG16 FC2 (4096-dim)...")
+        base = VGG16(weights="imagenet", include_top=True)
+        vgg = Model(inputs=base.input, outputs=base.get_layer("fc2").output)
+        logging.info("✔ VGG16 loaded successfully")
+    except MemoryError:
+        logging.error("❌ MEMORY ERROR: Ran out of RAM loading VGG16.")
+    except Exception as e:
+        logging.error(f"❌ Unknown error loading VGG16: {e}")
+        traceback.print_exc()
 
 
 def extract_feature(image_path):
     """Extract 4096-dim features using VGG16 FC2"""
+    if vgg is None:
+        logging.error("VGG model is None. Cannot extract features.")
+        return None
+        
     try:
+        logging.info(f"Processing image: {image_path}")
+        if not os.path.exists(image_path):
+            logging.error(f"Error: Image file not found at {image_path}")
+            return None
+            
         img = load_img(image_path, target_size=(224, 224))
         img = img_to_array(img)
         img = np.expand_dims(img, axis=0)
         img = preprocess_input(img)
+        logging.info("Extracting features with VGG16...")
         feature = vgg.predict(img, verbose=0)
+        logging.info(f"Feature shape: {feature.shape}")
         return feature
     except Exception as e:
-        print("Feature extraction error:", e)
+        logging.error(f"Feature extraction error: {e}")
+        traceback.print_exc()
         return None
 
 
 def idx_to_word(idx):
+    if tokenizer is None:
+        return None
     for word, word_id in tokenizer.word_index.items():
         if word_id == idx:
             return word
@@ -69,85 +113,23 @@ def idx_to_word(idx):
 
 def generate_caption_greedy(photo):
     """Greedy decoding - picks most probable word at each step"""
+    if model is None or tokenizer is None:
+        return "Error: Model not loaded."
+        
     in_text = "startseq"
-
     for _ in range(max_len):
         sequence = tokenizer.texts_to_sequences([in_text])[0]
         sequence = pad_sequences([sequence], maxlen=max_len)
-
         yhat = model.predict([photo, sequence], verbose=0)
         yhat = np.argmax(yhat)
-
         word = idx_to_word(yhat)
         if word is None or word == "endseq":
             break
-
         in_text += " " + word
-
-    caption = in_text.replace("startseq", "").replace("endseq", "").strip()
-    return caption
+    return in_text.replace("startseq", "").replace("endseq", "").strip()
 
 
-def generate_caption_sampling(photo, temperature=0.5):
-    """Temperature-based sampling - adds controlled randomness"""
-    in_text = "startseq"
-
-    for _ in range(max_len):
-        sequence = tokenizer.texts_to_sequences([in_text])[0]
-        sequence = pad_sequences([sequence], maxlen=max_len)
-
-        yhat = model.predict([photo, sequence], verbose=0)
-        
-        # Apply temperature scaling
-        yhat = np.log(yhat + 1e-10) / temperature
-        exp_yhat = np.exp(yhat)
-        yhat = exp_yhat / np.sum(exp_yhat)
-        
-        # Sample from probability distribution
-        yhat_idx = np.random.choice(len(yhat[0]), p=yhat[0])
-
-        word = idx_to_word(yhat_idx)
-        if word is None or word == "endseq":
-            break
-
-        in_text += " " + word
-
-    caption = in_text.replace("startseq", "").replace("endseq", "").strip()
-    return caption
-
-
-def generate_caption_no_repeat(photo):
-    """Prevents word repetition by masking already used words"""
-    in_text = "startseq"
-    used_words = set()
-
-    for _ in range(max_len):
-        sequence = tokenizer.texts_to_sequences([in_text])[0]
-        sequence = pad_sequences([sequence], maxlen=max_len)
-
-        yhat = model.predict([photo, sequence], verbose=0)[0]
-        
-        # Mask already used words (except common words)
-        common_words = {"a", "an", "the", "in", "on", "at", "of", "to", "and"}
-        for word, idx in tokenizer.word_index.items():
-            if word in used_words and word not in common_words and idx < len(yhat):
-                yhat[idx] = 0
-        
-        # Re-normalize probabilities
-        if yhat.sum() > 0:
-            yhat = yhat / yhat.sum()
-        
-        yhat_idx = np.argmax(yhat)
-        word = idx_to_word(yhat_idx)
-        
-        if word is None or word == "endseq":
-            break
-
-        used_words.add(word)
-        in_text += " " + word
-
-    caption = in_text.replace("startseq", "").replace("endseq", "").strip()
-    return caption
+# --- DELETED THE OTHER 2 GENERATE FUNCTIONS ---
 
 
 @app.route("/")
@@ -157,43 +139,65 @@ def index():
 
 @app.route("/generate-caption", methods=["POST"])
 def generate_caption_route():
-    if "image" not in request.files:
-        return jsonify({"error": "No image uploaded"}), 400
-
-    file = request.files["image"]
-
-    if file.filename == "":
-        return jsonify({"error": "No file selected"}), 400
-
-    if not allowed_file(file.filename):
-        return jsonify({"error": "Invalid file type"}), 400
-
-    filename = secure_filename(file.filename)
-    filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-    file.save(filepath)
-
-    feature = extract_feature(filepath)
-    os.remove(filepath)
-
-    if feature is None:
-        return jsonify({"error": "Failed to process image"}), 500
-
-    # Generate all caption types
     try:
-        captions = {
-            "greedy": generate_caption_greedy(feature),
-            "sampling_low": generate_caption_sampling(feature, temperature=0.5),
-            "sampling_high": generate_caption_sampling(feature, temperature=0.7),
-            "no_repeat": generate_caption_no_repeat(feature)
-        }
+        if "image" not in request.files:
+            return jsonify({"error": "No image uploaded"}), 400
+        file = request.files["image"]
+        if file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+        if not allowed_file(file.filename):
+            return jsonify({"error": "Invalid file type"}), 400
+
+        import time
+        timestamp = str(int(time.time() * 1000))
+        filename = f"{timestamp}_{secure_filename(file.filename)}"
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
         
+        logging.info(f"Saving file to: {filepath}")
+        file.save(filepath)
+        
+        if not os.path.exists(filepath):
+            logging.error("File save failed, os.path.exists is false.")
+            return jsonify({"error": "Failed to save file"}), 500
+
+        logging.info(f"File saved successfully, size: {os.path.getsize(filepath)} bytes")
+        
+        feature = extract_feature(filepath)
+        
+        try:
+            os.remove(filepath)
+            logging.info(f"Temporary file removed: {filepath}")
+        except Exception as e:
+            logging.warning(f"Could not remove temp file: {e}")
+
+        if feature is None:
+            logging.error("Feature extraction returned None. Check model loading logs.")
+            return jsonify({"error": "Failed to process image. Model may not be loaded."}), 500
+
+        logging.info("Generating caption...")
+        
+        # --- CHANGED: Only generate the one best caption ---
+        caption = generate_caption_greedy(feature)
+        captions = {
+            "greedy": caption
+        }
+        # --- END CHANGE ---
+        
+        logging.info(f"Captions generated: {captions}")
         return jsonify({"success": True, "captions": captions})
     
     except Exception as e:
-        print(f"Caption generation error: {e}")
-        return jsonify({"error": "Failed to generate captions"}), 500
+        logging.error(f"Unknown error in /generate-caption route: {e}")
+        traceback.print_exc()
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 
+# --- FIX: Call load_models() at global scope ---
+# This ensures it runs when Gunicorn (Render) starts the app.
+load_models()
+
+
+# This block is for local testing (running `python app.py`)
 if __name__ == "__main__":
-    load_models()
+    logging.info("Starting Flask app in debug mode for local testing...")
     app.run(host="0.0.0.0", port=5000, debug=True)
